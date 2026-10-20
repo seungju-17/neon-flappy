@@ -12,6 +12,7 @@ type Tab = 'ranking' | 'reviews' | 'stats';
 
 const NAME_KEY = 'neon-flappy:name';
 const BEST_KEY = 'neon-flappy:best';
+const MUTE_KEY = 'neon-flappy:muted';
 
 interface LastResult extends GameResult {
   rank?: number;
@@ -25,9 +26,12 @@ export default function GameApp() {
   const best = Number(bestStr) || 0;
   const [nameInput, setNameInput] = useState<string | null>(null);
   const nameValue = nameInput ?? name;
+  const [mutedStr, setMutedStr] = useLocalStorage(MUTE_KEY, '0');
+  const muted = mutedStr === '1';
   const [status, setStatus] = useState<GameStatus>('idle');
   const [score, setScore] = useState(0);
   const [level, setLevel] = useState(1);
+  const [lives, setLives] = useState(1);
   const [tab, setTab] = useState<Tab>('ranking');
   const [refreshKey, setRefreshKey] = useState(0);
   const [last, setLast] = useState<LastResult | null>(null);
@@ -38,9 +42,10 @@ export default function GameApp() {
     setNameInput(null);
   };
 
-  const onScoreChange = useCallback((s: number, l: number) => {
+  const onHudChange = useCallback((s: number, l: number, lv: number) => {
     setScore(s);
     setLevel(l);
+    setLives(lv);
   }, []);
 
   const onGameOver = useCallback(
@@ -74,7 +79,7 @@ export default function GameApp() {
       <header className="mb-6 text-center">
         <h1 className="neon-text-cyan text-4xl font-black tracking-[0.3em] md:text-5xl">NEON FLAPPY</h1>
         <p className="mt-2 text-xs tracking-widest text-muted">
-          점수는 Supabase에 저장되며 모든 플레이어와 랭킹을 겨룹니다
+          점수는 Supabase에 저장되며 모든 플레이어와 랭킹을 겨룹니다 · 🔊 소리를 켜고 플레이하세요
         </p>
       </header>
 
@@ -94,6 +99,10 @@ export default function GameApp() {
             <div className="font-mono text-2xl font-bold text-neon-green">{level}</div>
           </div>
           <div>
+            <div className="text-[11px] tracking-widest text-muted">LIVES</div>
+            <div className="neon-text-magenta font-mono text-2xl font-bold">{'♥'.repeat(Math.min(lives, 6)) || '—'}</div>
+          </div>
+          <div>
             <div className="text-[11px] tracking-widest text-muted">MY BEST</div>
             <div className="neon-text-magenta font-mono text-2xl font-bold">{best}</div>
           </div>
@@ -101,8 +110,16 @@ export default function GameApp() {
             <div>
               상태: <span className="text-text">{statusLabel(status)}</span>
             </div>
-            <div>레벨마다 속도 ↑, 틈 ↓</div>
+            <div>10개마다 레벨 ↑ (속도·BGM 템포 ↑)</div>
+            <div>20개마다 목숨 +1</div>
           </div>
+          <button
+            className={`neon-btn w-full !px-3 !py-1.5 text-xs ${muted ? 'magenta' : ''}`}
+            onClick={() => setMutedStr(muted ? '0' : '1')}
+            aria-pressed={muted}
+          >
+            {muted ? '🔇 BGM 꺼짐' : '🔊 BGM 켜짐'}
+          </button>
         </aside>
 
         {/* 가운데: 게임 */}
@@ -135,8 +152,9 @@ export default function GameApp() {
 
             <FlappyGame
               canStart={name.length > 0}
+              muted={muted}
               onStatusChange={onStatusChange}
-              onScoreChange={onScoreChange}
+              onHudChange={onHudChange}
               onGameOver={onGameOver}
             />
 

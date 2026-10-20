@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { GameAudio } from '@/lib/audio';
 
 export type GameStatus = 'idle' | 'running' | 'paused' | 'over';
 
@@ -13,8 +14,9 @@ export interface GameResult {
 interface FlappyGameProps {
   /** 이름이 없으면 시작할 수 없음 */
   canStart: boolean;
+  muted: boolean;
   onStatusChange?: (status: GameStatus) => void;
-  onScoreChange?: (score: number, level: number) => void;
+  onHudChange?: (score: number, level: number, lives: number) => void;
   onGameOver: (result: GameResult) => void;
 }
 
@@ -28,8 +30,10 @@ const GRAVITY = 1500; // px/s^2
 const FLAP_VY = -430; // px/s
 const MAX_VY = 650;
 const PIPE_W = 62;
-const PIPE_SPACING = 240;
-const PIPES_PER_LEVEL = 10;
+const PIPES_PER_LEVEL = 10; // 10개마다 난이도 상승
+const PIPES_PER_LIFE = 20; // 20개마다 목숨 +1
+const INVINCIBLE_SEC = 1.6; // 피격 후 무적 시간
+const START_LIVES = 1;
 
 interface Pipe {
   x: number;
@@ -45,6 +49,9 @@ interface World {
   pipes: Pipe[];
   score: number;
   level: number;
+  lives: number;
+  invincibleUntil: number; // elapsed 기준
+  toast: { text: string; until: number; color: string } | null;
   startedAt: number;
   elapsed: number; // 일시정지 제외 누적 초
   lastTs: number;
@@ -55,11 +62,15 @@ interface World {
 function levelOf(score: number) {
   return Math.floor(score / PIPES_PER_LEVEL) + 1;
 }
+// 평균적으로 30개 전후까지 갈 수 있도록 완만하게 상승
 function speedOf(level: number) {
-  return 160 + (level - 1) * 14;
+  return 150 + (level - 1) * 10;
 }
 function gapOf(level: number) {
-  return Math.max(118, 168 - (level - 1) * 6);
+  return Math.max(130, 178 - (level - 1) * 6);
+}
+function spacingOf(level: number) {
+  return Math.max(205, 250 - (level - 1) * 8);
 }
 
 function freshWorld(): World {
@@ -70,6 +81,9 @@ function freshWorld(): World {
     pipes: [],
     score: 0,
     level: 1,
+    lives: START_LIVES,
+    invincibleUntil: 0,
+    toast: null,
     startedAt: 0,
     elapsed: 0,
     lastTs: 0,
@@ -86,22 +100,43 @@ function spawnPipe(x: number, level: number): Pipe {
   return { x, gapY: minY + Math.random() * (maxY - minY), gapH, passed: false };
 }
 
-export default function FlappyGame({ canStart, onStatusChange, onScoreChange, onGameOver }: FlappyGameProps) {
+export default function FlappyGame({
+  canStart,
+  muted,
+  onStatusChange,
+  onHudChange,
+  onGameOver,
+}: FlappyGameProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const worldRef = useRef<World>(freshWorld());
   const rafRef = useRef<number>(0);
+  const audioRef = useRef<GameAudio | null>(null);
   const [status, setStatus] = useState<GameStatus>('idle');
 
   const canStartRef = useRef(canStart);
   const onGameOverRef = useRef(onGameOver);
-  const onScoreRef = useRef(onScoreChange);
+  const onHudRef = useRef(onHudChange);
   const onStatusRef = useRef(onStatusChange);
   useEffect(() => {
     canStartRef.current = canStart;
     onGameOverRef.current = onGameOver;
-    onScoreRef.current = onScoreChange;
+    onHudRef.current = onHudChange;
     onStatusRef.current = onStatusChange;
   });
+
+  const audio = useCallback(() => {
+    if (!audioRef.current) audioRef.current = new GameAudio();
+    return audioRef.current;
+  }, []);
+
+  useEffect(() => {
+    audio().setMuted(muted);
+  }, [muted, audio]);
+
+  useEffect(() => {
+    const a = audioRef;
+    return () => a.current?.dispose();
+  }, []);
 
   const setWorldStatus = useCallback((s: GameStatus) => {
     worldRef.current.status = s;
@@ -110,11 +145,12 @@ export default function FlappyGame({ canStart, onStatusChange, onScoreChange, on
   }, []);
 
   const reset = useCallback(() => {
+    audio().stopBgm();
     worldRef.current = freshWorld();
     setStatus('idle');
     onStatusRef.current?.('idle');
-    onScoreRef.current?.(0, 1);
-  }, []);
+    onHudRef.current?.(0, 1, START_LIVES);
+  }, [audio]);
 
   const start = useCallback(() => {
     if (!canStartRef.current) return;
@@ -123,12 +159,17 @@ export default function FlappyGame({ canStart, onStatusChange, onScoreChange, on
     w.startedAt = performance.now();
     w.lastTs = w.startedAt;
     w.birdVy = FLAP_VY;
-    w.pipes = [spawnPipe(W + 120, 1), spawnPipe(W + 120 + PIPE_SPACING, 1)];
+    w.pipes = [spawnPipe(W + 120, 1), spawnPipe(W + 120 + spacingOf(1), 1)];
     worldRef.current = w;
     setStatus('running');
     onStatusRef.current?.('running');
-    onScoreRef.current?.(0, 1);
-  }, []);
+    onHudRef.current?.(0, 1, START_LIVES);
+    const a = audio();
+    a.init();
+    a.setLevel(1);
+    a.startBgm();
+    a.sfxFlap();
+  }, [audio]);
 
   const flap = useCallback(() => {
     const w = worldRef.current;
@@ -138,21 +179,26 @@ export default function FlappyGame({ canStart, onStatusChange, onScoreChange, on
     }
     if (w.status === 'paused') {
       w.lastTs = performance.now();
+      audio().resume();
       setWorldStatus('running');
       return;
     }
     w.birdVy = FLAP_VY;
     w.wingT = 0;
-  }, [start, setWorldStatus]);
+    audio().sfxFlap();
+  }, [start, setWorldStatus, audio]);
 
   const togglePause = useCallback(() => {
     const w = worldRef.current;
-    if (w.status === 'running') setWorldStatus('paused');
-    else if (w.status === 'paused') {
+    if (w.status === 'running') {
+      audio().suspend();
+      setWorldStatus('paused');
+    } else if (w.status === 'paused') {
       w.lastTs = performance.now();
+      audio().resume();
       setWorldStatus('running');
     }
-  }, [setWorldStatus]);
+  }, [setWorldStatus, audio]);
 
   // ---- 입력 ----
   useEffect(() => {
@@ -183,6 +229,10 @@ export default function FlappyGame({ canStart, onStatusChange, onScoreChange, on
     canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+    const showToast = (w: World, text: string, color: string, sec = 1.3) => {
+      w.toast = { text, until: w.elapsed + sec, color };
+    };
+
     const update = (now: number) => {
       const w = worldRef.current;
       if (w.status !== 'running') return;
@@ -205,19 +255,45 @@ export default function FlappyGame({ canStart, onStatusChange, onScoreChange, on
         if (!p.passed && p.x + PIPE_W < BIRD_X - BIRD_R) {
           p.passed = true;
           w.score += 1;
+          const a = audioRef.current;
+          a?.sfxScore();
+
+          // 20개마다 목숨 +1
+          if (w.score % PIPES_PER_LIFE === 0) {
+            w.lives += 1;
+            a?.sfxLife();
+            showToast(w, '+1 LIFE ♥', '#4dff9a', 1.6);
+          }
+          // 10개마다 레벨 업 (속도↑, 틈↓, 간격↓, BGM 템포↑)
           const nl = levelOf(w.score);
-          if (nl !== w.level) w.level = nl;
-          onScoreRef.current?.(w.score, w.level);
+          if (nl !== w.level) {
+            w.level = nl;
+            a?.setLevel(nl);
+            if (w.score % PIPES_PER_LIFE !== 0) {
+              a?.sfxLevelUp();
+              showToast(w, `LEVEL ${nl}`, '#22e6ff');
+            }
+          }
+          onHudRef.current?.(w.score, w.level, w.lives);
         }
       }
       // 화면 밖 제거 / 새 파이프
       if (w.pipes.length && w.pipes[0].x + PIPE_W < -10) w.pipes.shift();
+      const spacing = spacingOf(w.level);
       const last = w.pipes[w.pipes.length - 1];
-      if (!last || last.x < W - PIPE_SPACING + PIPE_W) {
-        w.pipes.push(spawnPipe((last ? last.x : W) + PIPE_SPACING, w.level));
+      if (!last || last.x < W - spacing + PIPE_W) {
+        w.pipes.push(spawnPipe((last ? last.x : W) + spacing, w.level));
       }
 
       // 충돌
+      const invincible = w.elapsed < w.invincibleUntil;
+      if (invincible) {
+        // 무적 중에는 화면 밖으로 나가지만 않게
+        w.birdY = Math.max(BIRD_R, Math.min(H - GROUND_H - BIRD_R, w.birdY));
+        if (w.birdY >= H - GROUND_H - BIRD_R) w.birdVy = Math.min(w.birdVy, 0);
+        return;
+      }
+
       const top = w.birdY - BIRD_R;
       const bottom = w.birdY + BIRD_R;
       let dead = bottom >= H - GROUND_H || top <= 0;
@@ -236,17 +312,36 @@ export default function FlappyGame({ canStart, onStatusChange, onScoreChange, on
           }
         }
       }
-      if (dead) {
-        w.birdY = Math.min(w.birdY, H - GROUND_H - BIRD_R);
-        w.status = 'over';
-        setStatus('over');
-        onStatusRef.current?.('over');
-        onGameOverRef.current({
-          score: w.score,
-          level: w.level,
-          durationSec: Math.round(w.elapsed),
-        });
+      if (!dead) return;
+
+      if (w.lives > 1) {
+        // 목숨 소모 후 재시작 (주변 파이프 제거 + 무적)
+        w.lives -= 1;
+        w.birdY = H / 2 - 20;
+        w.birdVy = 0;
+        w.invincibleUntil = w.elapsed + INVINCIBLE_SEC;
+        w.pipes = w.pipes.filter((p) => p.x + PIPE_W < BIRD_X - 120 || p.x > BIRD_X + 180);
+        audioRef.current?.sfxHit();
+        showToast(w, '-1 LIFE', '#ff3cac');
+        onHudRef.current?.(w.score, w.level, w.lives);
+        return;
       }
+
+      w.birdY = Math.min(w.birdY, H - GROUND_H - BIRD_R);
+      w.lives = 0;
+      w.status = 'over';
+      setStatus('over');
+      onStatusRef.current?.('over');
+      onHudRef.current?.(w.score, w.level, 0);
+      const a = audioRef.current;
+      a?.stopBgm();
+      a?.sfxHit();
+      a?.sfxGameOver();
+      onGameOverRef.current({
+        score: w.score,
+        level: w.level,
+        durationSec: Math.round(w.elapsed),
+      });
     };
 
     const draw = () => {
@@ -306,10 +401,12 @@ export default function FlappyGame({ canStart, onStatusChange, onScoreChange, on
         ctx.stroke();
       }
 
-      // 새
-      drawBird(ctx, BIRD_X, w.birdY, w.birdVy, w.wingT, w.status);
+      // 새 (무적 중엔 깜빡임)
+      const invincible = w.status === 'running' && w.elapsed < w.invincibleUntil;
+      const blinkHidden = invincible && Math.floor(w.elapsed * 12) % 2 === 0;
+      if (!blinkHidden) drawBird(ctx, BIRD_X, w.birdY, w.birdVy, w.wingT, w.status);
 
-      // HUD 점수
+      // HUD
       if (w.status !== 'idle') {
         ctx.save();
         ctx.font = 'bold 44px ui-monospace, Menlo, monospace';
@@ -318,6 +415,36 @@ export default function FlappyGame({ canStart, onStatusChange, onScoreChange, on
         ctx.shadowBlur = 16;
         ctx.fillStyle = '#e6f1ff';
         ctx.fillText(String(w.score), W / 2, 64);
+
+        // 목숨
+        ctx.textAlign = 'left';
+        ctx.font = 'bold 18px ui-monospace, Menlo, monospace';
+        ctx.shadowColor = '#ff3cac';
+        ctx.shadowBlur = 10;
+        ctx.fillStyle = '#ff3cac';
+        ctx.fillText('♥'.repeat(Math.max(0, Math.min(w.lives, 6))) + (w.lives > 6 ? ` ×${w.lives}` : ''), 12, 28);
+
+        // 레벨
+        ctx.textAlign = 'right';
+        ctx.font = 'bold 14px ui-monospace, Menlo, monospace';
+        ctx.shadowColor = '#4dff9a';
+        ctx.fillStyle = '#4dff9a';
+        ctx.fillText(`LV ${w.level}`, W - 12, 26);
+        ctx.restore();
+      }
+
+      // 토스트
+      if (w.toast && w.elapsed < w.toast.until) {
+        const remain = w.toast.until - w.elapsed;
+        const alpha = Math.min(1, remain / 0.4);
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 30px ui-monospace, Menlo, monospace';
+        ctx.fillStyle = w.toast.color;
+        ctx.shadowColor = w.toast.color;
+        ctx.shadowBlur = 18;
+        ctx.fillText(w.toast.text, W / 2, H / 2 - 60);
         ctx.restore();
       }
 
@@ -360,7 +487,7 @@ export default function FlappyGame({ canStart, onStatusChange, onScoreChange, on
             <br />
             <b className="text-text">P / Esc</b> — 일시정지
             <br />
-            파이프 10개마다 레벨 상승, 속도 증가
+            10개마다 난이도 ↑ · <span className="text-neon-magenta">20개마다 목숨 +1</span>
           </p>
           <button className="neon-btn" onClick={start} disabled={!canStart}>
             ▶ START GAME

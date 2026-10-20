@@ -13,7 +13,9 @@
 | Space / ↑ / W / 클릭(터치) | 점프 (시작) |
 | P / Esc | 일시정지 / 재개 |
 
-파이프 10개를 통과할 때마다 레벨이 오르고, 속도가 빨라지며 파이프 틈이 좁아집니다.
+- 파이프 **10개**를 통과할 때마다 레벨이 오릅니다. 속도가 빨라지고, 파이프 틈과 간격이 좁아지며, BGM 템포가 올라갑니다.
+- 파이프 **20개**를 통과할 때마다 목숨이 1개 늘어납니다. 목숨이 남아 있으면 부딪혀도 잠시 무적 상태로 이어서 플레이합니다.
+- BGM 과 효과음은 Web Audio API 로 실시간 생성됩니다 (외부 음원 파일 없음). 왼쪽 패널의 버튼으로 끌 수 있습니다.
 
 ## 설정
 
@@ -45,6 +47,7 @@ components/FlappyGame.tsx → 캔버스 게임 엔진 (물리, 충돌, 렌더링
 components/RankingPanel.tsx / ReviewsPanel.tsx / StatsPanel.tsx
 lib/supabase.ts           → Supabase 클라이언트
 lib/db.ts                 → 점수/리뷰/통계 쿼리 함수
+lib/audio.ts              → Web Audio 칩튠 BGM/효과음
 supabase/schema.sql       → 테이블·뷰·RLS 정의
 ```
 
